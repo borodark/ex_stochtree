@@ -21,3 +21,6 @@ stochtree_ex-*.tar
 
 # Temporary files, for example, from tests.
 /tmp/
+
+# Rust build artifacts (compiled NIF is in priv/)
+/native/stochtree_nif/target/
