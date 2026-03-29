@@ -1,0 +1,58 @@
+[
+  {
+    "name": "smoke (1K\u00d710)",
+    "time_ms": 2060,
+    "rmse": 0.8051,
+    "sigma": 0.0,
+    "n": 1000,
+    "p": 10
+  },
+  {
+    "name": "medium-n (10K\u00d710)",
+    "time_ms": 24421,
+    "rmse": 0.928,
+    "sigma": 0.0,
+    "n": 10000,
+    "p": 10
+  },
+  {
+    "name": "large-n (50K\u00d710)",
+    "time_ms": 22695,
+    "rmse": 1.0862,
+    "sigma": 0.0,
+    "n": 50000,
+    "p": 10
+  },
+  {
+    "name": "high-p (1K\u00d7100)",
+    "time_ms": 26485,
+    "rmse": 0.6266,
+    "sigma": 0.0,
+    "n": 1000,
+    "p": 100
+  },
+  {
+    "name": "extreme-p (5K\u00d7500)",
+    "time_ms": 58774,
+    "rmse": 0.7357,
+    "sigma": 0.0,
+    "n": 5000,
+    "p": 500
+  },
+  {
+    "name": "smooth-sin (5K\u00d75)",
+    "time_ms": 9413,
+    "rmse": 0.1873,
+    "sigma": 0.0,
+    "n": 5000,
+    "p": 5
+  },
+  {
+    "name": "california (20K\u00d78)",
+    "time_ms": 40838,
+    "rmse": 0.0055,
+    "sigma": 0.0,
+    "n": 20000,
+    "p": 8
+  }
+]

@@ -1,0 +1,425 @@
+# Feature Discovery with BART
+
+```elixir
+Mix.install([
+  {:stochtree_ex, path: Path.expand("../", __DIR__)},
+  {:kino, "~> 0.14"},
+  {:kino_vega_lite, "~> 0.1"}
+])
+```
+
+## The Situation
+
+You have twenty columns of sensor data and a quality measurement. Five
+of the columns matter. Fifteen are noise. You do not know which five.
+
+Linear regression will tell you all twenty are significant at p < 0.05.
+It will do this because twenty predictors on two thousand observations
+will always find something, and because the true relationships are
+nonlinear — a sine, a quadratic, an interaction term — and linear
+regression cannot represent what it cannot see, so it compensates by
+distributing blame across every available coefficient.
+
+BART does not have this problem. It fits 200 small decision trees.
+Each tree is deliberately stunted — a few splits, a few leaves. No
+single tree captures the signal. The ensemble sum does. And because
+each split is a binary decision on one feature at one threshold,
+the algorithm automatically discovers which features carry signal,
+what the functional form looks like, and where the interactions are.
+
+No formula required. No distributional assumptions. The data speaks
+for itself, and BART listens at 200 different frequencies simultaneously.
+
+## The Test: Friedman's Function #1
+
+The standard benchmark for nonparametric regression since 1991. Five
+signal features, fifteen noise features, and a generating function
+designed to torture linear methods:
+
+**y = 10 sin(pi x1 x2) + 20(x3 - 0.5)^2 + 10 x4 + 5 x5 + N(0, 1)**
+
+The sine interaction between x1 and x2 cannot be captured by any sum
+of main effects. The quadratic in x3 has its minimum at exactly 0.5.
+Features x4 and x5 are linear but with different coefficients. The
+fifteen noise features are uniform random — pure distraction.
+
+```elixir
+:rand.seed(:exsss, {42, 43, 44})
+
+n = 2000
+p_signal = 5
+p_noise = 15
+p = p_signal + p_noise
+
+x = for _ <- 1..n do
+  for _ <- 1..p, do: :rand.uniform()
+end
+
+y = Enum.map(x, fn row ->
+  [x1, x2, x3, x4, x5 | _] = row
+  10 * :math.sin(:math.pi() * x1 * x2) +
+    20 * :math.pow(x3 - 0.5, 2) +
+    10 * x4 +
+    5 * x5 +
+    :rand.normal()
+end)
+
+feature_names = for i <- 1..p do
+  if i <= 5, do: "signal_#{i}", else: "noise_#{i - 5}"
+end
+
+IO.puts("#{n} observations. #{p} features (#{p_signal} signal, #{p_noise} noise).")
+IO.puts("The algorithm sees only X and y. It does not know the generating function.")
+```
+
+```elixir
+alias VegaLite, as: Vl
+
+y_data = Enum.map(y, &%{"y" => &1})
+
+Vl.new(width: 600, height: 200, title: "Distribution of y — the only thing the algorithm sees")
+|> Vl.data_from_values(y_data)
+|> Vl.mark(:bar, opacity: 0.7, color: "steelblue")
+|> Vl.encode_field(:x, "y", type: :quantitative, bin: [maxbins: 200])
+|> Vl.encode(:y, aggregate: :count)
+```
+
+## Fit BART
+
+200 trees. 100 GFR iterations build the initial ensemble greedily —
+each tree grows from root, finding the best split at every node.
+100 MCMC iterations refine the ensemble via Metropolis-Hastings:
+proposing to grow a leaf or prune a branch, accepting or rejecting
+based on the marginal likelihood. The Rust NIF handles all of it
+in a single call.
+
+```elixir
+t0 = System.monotonic_time(:millisecond)
+
+{forest, sigmas} = StochTree.BART.fit(x, y,
+  num_trees: 200,
+  num_gfr: 100,
+  num_mcmc: 100,
+  seed: 42
+)
+
+elapsed = System.monotonic_time(:millisecond) - t0
+
+%{mean: y_hat, lower: y_lower, upper: y_upper} = StochTree.predict(forest, x)
+
+rmse = :math.sqrt(
+  Enum.zip(y, y_hat)
+  |> Enum.map(fn {a, b} -> (a - b) * (a - b) end)
+  |> Enum.sum()
+  |> Kernel./(n)
+)
+
+y_mean = Enum.sum(y) / n
+ss_tot = Enum.map(y, &(:math.pow(&1 - y_mean, 2))) |> Enum.sum()
+ss_res = Enum.zip(y, y_hat) |> Enum.map(fn {a, b} -> (a - b) * (a - b) end) |> Enum.sum()
+r2 = 1.0 - ss_res / ss_tot
+
+sigma_final = List.last(sigmas)
+
+IO.puts("Fit in #{elapsed}ms (#{Float.round(elapsed / 1000, 1)}s)")
+IO.puts("RMSE: #{Float.round(rmse, 3)}")
+IO.puts("R²:   #{Float.round(r2, 3)}")
+IO.puts("Estimated noise σ: #{Float.round(sigma_final, 3)} (true: 1.0)")
+```
+
+## Who Gets the Splits
+
+Variable importance in BART is not a p-value. It is a count: how many
+times, across all 200 trees and all their internal nodes, did the
+algorithm choose to split on this feature? Features that explain
+variance get split on often. Noise features get split on rarely —
+and only by accident.
+
+The ground truth: features 1-5 carry all the signal. Features 6-20
+are uniform noise. A correct importance ranking puts all five signal
+features at the top, with a visible gap between them and the noise.
+
+```elixir
+# variable_importance returns [{feature_index, split_count}, ...] sorted descending
+importance = StochTree.variable_importance(forest)
+
+imp_data = importance
+|> Enum.map(fn {feat_idx, count} ->
+  name = Enum.at(feature_names, feat_idx)
+  %{"feature" => name, "importance" => count,
+    "type" => if(feat_idx < 5, do: "signal", else: "noise")}
+end)
+|> Enum.sort_by(& &1["importance"], :desc)
+```
+
+```elixir
+Vl.new(width: 600, height: 300, title: "Variable Importance — split counts across 200 trees")
+|> Vl.data_from_values(imp_data)
+|> Vl.mark(:bar)
+|> Vl.encode_field(:x, "feature", type: :nominal,
+     sort: %{field: "importance", order: "descending"})
+|> Vl.encode_field(:y, "importance", type: :quantitative, title: "Split count")
+|> Vl.encode_field(:color, "type", type: :nominal,
+     scale: %{domain: ["signal", "noise"], range: ["steelblue", "#ccc"]})
+```
+
+```elixir
+IO.puts("Top 5 features by split count:")
+imp_data
+|> Enum.take(5)
+|> Enum.each(fn %{"feature" => f, "importance" => i, "type" => t} ->
+  IO.puts("  #{f}: #{i} splits (#{t})")
+end)
+
+top5_names = imp_data |> Enum.take(5) |> Enum.map(& &1["feature"]) |> MapSet.new()
+signal_names = for i <- 1..5, do: "signal_#{i}"
+recovered = Enum.count(signal_names, &MapSet.member?(top5_names, &1))
+IO.puts("\n#{recovered}/5 signal features recovered in top 5.")
+```
+
+## Predicted vs Actual
+
+If the model is working, this plot is a cloud around the 45-degree
+line. Deviations from the line are the noise — the irreducible N(0,1)
+that even a perfect model cannot remove.
+
+```elixir
+pred_data = Enum.zip([y, y_hat, y_lower, y_upper])
+|> Enum.take(500)
+|> Enum.map(fn {actual, pred, lo, hi} ->
+  %{"actual" => actual, "predicted" => pred, "lower" => lo, "upper" => hi}
+end)
+
+Vl.new(width: 500, height: 500, title: "Predicted vs Actual (first 500 observations)")
+|> Vl.layers([
+  Vl.new()
+  |> Vl.data_from_values([%{"x" => -5, "y" => -5}, %{"x" => 30, "y" => 30}])
+  |> Vl.mark(:line, color: "red", stroke_dash: [6, 4], opacity: 0.5)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "y", type: :quantitative),
+  Vl.new()
+  |> Vl.data_from_values(pred_data)
+  |> Vl.mark(:circle, size: 20, opacity: 0.4, color: "steelblue")
+  |> Vl.encode_field(:x, "actual", type: :quantitative, title: "Actual y")
+  |> Vl.encode_field(:y, "predicted", type: :quantitative, title: "Predicted y")
+])
+```
+
+## What the Algorithm Learned: Partial Dependence
+
+Partial dependence isolates the marginal effect of one feature,
+averaging over all others. For signal features, we should see the
+true functional form emerge from the ensemble — the sine, the
+quadratic, the two linear slopes — without anyone telling the
+algorithm what shapes to look for.
+
+```elixir
+defmodule PartialDep do
+  def compute(forest, x, feat_idx, n_grid \\ 30) do
+    n = length(x)
+    vals = Enum.map(x, &Enum.at(&1, feat_idx))
+    lo = Enum.min(vals)
+    hi = Enum.max(vals)
+    grid = for i <- 0..(n_grid - 1), do: lo + (hi - lo) * i / (n_grid - 1)
+
+    x_sub = Enum.take_every(x, max(div(n, 200), 1)) |> Enum.take(200)
+    n_sub = length(x_sub)
+
+    Enum.map(grid, fn g ->
+      x_mod = Enum.map(x_sub, fn row -> List.replace_at(row, feat_idx, g) end)
+      %{mean: preds} = StochTree.predict(forest, x_mod)
+      avg = Enum.sum(preds) / n_sub
+      %{val: g, pd: avg}
+    end)
+  end
+end
+```
+
+```elixir
+pd_charts = for {feat_idx, fname} <- [
+  {0, "x1 — sin interaction with x2"},
+  {1, "x2 — sin interaction with x1"},
+  {2, "x3 — quadratic (minimum at 0.5)"},
+  {3, "x4 — linear (coefficient 10)"},
+  {4, "x5 — linear (coefficient 5)"}
+] do
+  pd = PartialDep.compute(forest, x, feat_idx)
+  pd_data = Enum.map(pd, fn %{val: v, pd: p} -> %{"x" => v, "pd" => p} end)
+
+  Vl.new(width: 250, height: 180, title: fname)
+  |> Vl.data_from_values(pd_data)
+  |> Vl.mark(:line, color: "steelblue", stroke_width: 2)
+  |> Vl.encode_field(:x, "x", type: :quantitative, title: "Feature value")
+  |> Vl.encode_field(:y, "pd", type: :quantitative, title: "Partial dependence")
+end
+
+Vl.new()
+|> Vl.concat(pd_charts, :wrappable)
+```
+
+## The Noise Check
+
+Partial dependence for noise features should be flat. No slope, no
+curvature, no structure. A horizontal line at the global mean. If
+any noise feature shows a trend, the model is overfitting.
+
+```elixir
+noise_charts = for i <- [5, 10, 15] do
+  fname = "noise_#{i - 4} (should be flat)"
+  pd = PartialDep.compute(forest, x, i)
+  pd_data = Enum.map(pd, fn %{val: v, pd: p} -> %{"x" => v, "pd" => p} end)
+
+  Vl.new(width: 200, height: 150, title: fname)
+  |> Vl.data_from_values(pd_data)
+  |> Vl.mark(:line, color: "#999", stroke_width: 2)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "pd", type: :quantitative, title: "PD")
+end
+
+Vl.new()
+|> Vl.concat(noise_charts, :wrappable)
+```
+
+## The Noise Estimate
+
+BART jointly estimates the observation noise standard deviation. The
+trace should converge to the true value — 1.0. If it undershoots, the
+trees are absorbing noise as signal. If it overshoots, the trees are
+too shallow to capture the function.
+
+```elixir
+sigma_data = sigmas
+|> Enum.with_index()
+|> Enum.map(fn {s, i} -> %{"iteration" => i, "sigma" => s} end)
+
+Vl.new(width: 600, height: 200, title: "Noise σ trace — true value is 1.0")
+|> Vl.layers([
+  Vl.new()
+  |> Vl.data_from_values(sigma_data)
+  |> Vl.mark(:line, color: "steelblue", stroke_width: 1)
+  |> Vl.encode_field(:x, "iteration", type: :quantitative)
+  |> Vl.encode_field(:y, "sigma", type: :quantitative),
+  Vl.new()
+  |> Vl.mark(:rule, color: "red", stroke_dash: [6, 4])
+  |> Vl.encode(:y, datum: 1.0)
+])
+```
+
+## A Harder Test: Synthetic Housing
+
+The Friedman function is a clean benchmark. Real data is messier. Here
+is a synthetic housing dataset with six features, three kinds of
+nonlinearity, and one feature that does nothing at all.
+
+The true generating process:
+
+* **Income**: log effect (diminishing returns)
+* **Rooms**: linear
+* **Latitude/Longitude**: location interaction (distance from a reference point)
+* **Population**: threshold effect (price drops when density exceeds 3,000)
+* **Age**: pure noise — no effect whatsoever
+
+BART should discover all of this without being told.
+
+```elixir
+:rand.seed(:exsss, {70, 71, 72})
+n_house = 5000
+
+income = for _ <- 1..n_house, do: :rand.uniform() * 10 + 1
+age = for _ <- 1..n_house, do: :rand.uniform() * 50 + 1
+rooms = for _ <- 1..n_house, do: :rand.uniform() * 8 + 1
+pop = for _ <- 1..n_house, do: :rand.uniform() * 5000 + 100
+lat = for _ <- 1..n_house, do: :rand.uniform() * 5 + 32
+lon = for _ <- 1..n_house, do: :rand.uniform() * 10 - 124
+
+x_house = Enum.zip([income, age, rooms, pop, lat, lon])
+|> Enum.map(fn {inc, ag, rm, pp, la, lo} -> [inc, ag, rm, pp, la, lo] end)
+
+y_house = Enum.zip([income, age, rooms, pop, lat, lon])
+|> Enum.map(fn {inc, _ag, rm, pp, la, lo} ->
+  base = 0.4 * :math.log(inc + 1) + 0.2 * rm
+  location = -0.05 * abs(la - 37) - 0.03 * abs(lo + 120)
+  density_effect = if pp > 3000, do: -0.15, else: 0.0
+  base + location + density_effect + :rand.normal() * 0.15
+end)
+
+house_features = ["income", "age", "rooms", "population", "latitude", "longitude"]
+
+IO.puts("#{n_house} observations, #{length(house_features)} features.")
+IO.puts("True effects: income (log), rooms (linear), lat/lon (location), pop (threshold).")
+IO.puts("Age is noise. The algorithm does not know this.")
+```
+
+```elixir
+{h_forest, _h_sigmas} = StochTree.BART.fit(x_house, y_house,
+  num_trees: 200, num_gfr: 50, num_mcmc: 100, seed: 42)
+```
+
+```elixir
+h_imp = StochTree.variable_importance(h_forest)
+
+h_imp_data = h_imp
+|> Enum.map(fn {feat_idx, count} ->
+  %{"feature" => Enum.at(house_features, feat_idx), "importance" => count}
+end)
+|> Enum.sort_by(& &1["importance"], :desc)
+
+IO.puts("Housing variable importance:")
+Enum.each(h_imp_data, fn %{"feature" => f, "importance" => i} ->
+  IO.puts("  #{String.pad_trailing(f, 12)} #{i} splits")
+end)
+
+Vl.new(width: 500, height: 250, title: "Housing: which features matter?")
+|> Vl.data_from_values(h_imp_data)
+|> Vl.mark(:bar, color: "steelblue")
+|> Vl.encode_field(:x, "feature", type: :nominal,
+     sort: %{field: "importance", order: "descending"})
+|> Vl.encode_field(:y, "importance", type: :quantitative, title: "Split count")
+```
+
+```elixir
+h_pd_charts = for {name, idx} <- Enum.with_index(house_features) do
+  pd = PartialDep.compute(h_forest, x_house, idx, 25)
+  pd_data = Enum.map(pd, fn %{val: v, pd: p} -> %{"x" => v, "pd" => p} end)
+
+  Vl.new(width: 220, height: 160, title: name)
+  |> Vl.data_from_values(pd_data)
+  |> Vl.mark(:line, color: "steelblue", stroke_width: 2)
+  |> Vl.encode_field(:x, "x", type: :quantitative)
+  |> Vl.encode_field(:y, "pd", type: :quantitative, title: "PD")
+end
+
+Vl.new()
+|> Vl.concat(h_pd_charts, :wrappable)
+```
+
+## What Just Happened
+
+Two datasets. Forty features total. The algorithm was not told which
+features matter, what the functional forms are, or whether any
+interactions exist. It discovered:
+
+* A **sine interaction** between x1 and x2 that no linear method can see
+* A **quadratic** with a minimum at exactly the right place
+* Two **linear effects** with the correct relative magnitudes
+* A **log curve** in income, a **threshold** in population density
+* That **age** is noise — the flattest partial dependence of all six features
+
+All of this from split counts and partial dependence. No hypothesis
+testing. No model specification. No distributional assumptions.
+
+The 200 trees did not each learn the full function. Each learned a
+fragment. The sum learned everything.
+
+## Summary
+
+|                     |                                                                    |
+| ------------------- | ------------------------------------------------------------------ |
+| **Algorithm**       | BART (Chipman, George & McCulloch 2010)                            |
+| **Implementation**  | Rust NIF via Rustler, hybrid GFR + MH sampler                      |
+| **Trees**           | 200 (ensemble sum approximates any smooth function)                |
+| **Key outputs**     | Predictions, uncertainty intervals, variable importance, PD        |
+| **Discovery**       | Nonlinear effects, interactions, thresholds — without being told |
+| **Why not linear?** | sin(x1*x2) has zero linear correlation with y                      |
+| **Why BEAM?**       | Multi-chain via `Task.async_stream`, fault-tolerant NIF calls      |
+| **Library**         | StochTree-Ex — Elixir + Rust NIF, zero Nx dependency             |

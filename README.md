@@ -31,6 +31,9 @@ tool. Any errors in this translation are, naturally, the translator's own.
 Nonparametric Bayesian regression and causal inference via tree ensembles.
 Pure Rust NIF — no C++ dependencies, no Python, no external services.
 
+![Variable Importance](assets/bart_variable_importance.png)
+*5 signal features (blue) separated from 15 noise features (grey). 200 trees, 2000 observations, Rust NIF.*
+
 ```elixir
 # Fit: 200 trees, data-adaptive priors, posterior samples in seconds
 {forest, sigmas} = StochTree.BART.fit(x_train, y_train,
@@ -239,6 +242,24 @@ stochtree_ex/
   Nonlinear Regression." *JASA*.
 - Hahn, P.R., Murray, J.S. & Carvalho, C.M. (2020). "Bayesian Regression
   Tree Models for Causal Inference." *Bayesian Analysis*.
+
+## The Ecosystem: Three Comrades
+
+StochTree-Ex is one of three standalone Elixir libraries for Bayesian
+inference. Different algorithms, different use cases, zero shared dependencies.
+
+| Library | Algorithm | For |
+|---|---|---|
+| [**eXMC**](https://github.com/borodark/eXMC) | NUTS / HMC | Known parametric models, continuous parameters |
+| [**smc_ex**](https://github.com/borodark/smc_ex) | Bootstrap PF, PMCMC, Online SMC² | Discrete states, streaming data, epidemic tracking |
+| **StochTree-Ex** | BART | Unknown functional form, feature discovery |
+
+**When to use BART vs the others:**
+
+- You know the model structure (e.g., `y ~ Normal(mu, sigma)`) → use **eXMC** (NUTS)
+- Your states are discrete and data streams in real time → use **smc_ex** (O-SMC²)
+- You have many features and no idea what the functional form is → use **StochTree-Ex** (BART)
+- You want to discover which features to put into your NUTS model → run BART first for feature selection, then build the parametric model in eXMC
 
 ## License
 
