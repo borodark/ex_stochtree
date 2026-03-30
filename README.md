@@ -243,7 +243,9 @@ stochtree_ex/
 - Hahn, P.R., Murray, J.S. & Carvalho, C.M. (2020). "Bayesian Regression
   Tree Models for Causal Inference." *Bayesian Analysis*.
 
-## The Ecosystem: Three Comrades
+## The Ecosystem: Les Trois Chambrées
+
+_Probabiliers de tous les a priori, unissez-vous!_
 
 StochTree-Ex is one of three standalone Elixir libraries for Bayesian
 inference. Different algorithms, different use cases, zero shared dependencies.
