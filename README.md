@@ -243,7 +243,7 @@ stochtree_ex/
 - Hahn, P.R., Murray, J.S. & Carvalho, C.M. (2020). "Bayesian Regression
   Tree Models for Causal Inference." *Bayesian Analysis*.
 
-## The Ecosystem: Les Trois Chambrées
+## The Ecosystem: _Three Comrades_
 
 _Probabiliers de tous les a priori, unissez-vous!_
 
