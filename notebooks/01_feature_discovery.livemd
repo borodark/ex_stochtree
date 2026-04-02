@@ -8,6 +8,30 @@ Mix.install([
 ])
 ```
 
+## Why This Matters
+
+A semiconductor fab has 590 sensor columns per wafer. A failure rate of
+0.3%. The process engineer asks: "Which sensors predict failure?" The
+data scientist runs a logistic regression. Twenty sensors come back
+significant at p < 0.05. The engineer knows from physics that at most
+five matter. Who is wrong — the statistics or the physics?
+
+Neither. The statistics found twenty linear associations in 590 columns
+on 2,000 observations. With that many predictors, some will correlate
+with failure by chance. And the real relationships — a temperature
+threshold, a pressure-flow interaction, a nonlinear degradation curve —
+don't look linear. The regression can't represent what it can't see.
+
+**The question isn't "which features are statistically significant?" It's
+"which features actually drive the outcome, and what do the relationships
+look like?"** Significance testing answers the first question poorly and
+the second not at all.
+
+BART answers both. It discovers which features carry signal (variable
+importance), what the functional form looks like (partial dependence),
+and where the interactions are — without a formula, without distributional
+assumptions, without the analyst guessing the model structure.
+
 ## The Situation
 
 You have twenty columns of sensor data and a quality measurement. Five
